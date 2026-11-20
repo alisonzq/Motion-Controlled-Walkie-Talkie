@@ -23,39 +23,26 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
-#include "wifi.h"      /* WIFI_Init, WIFI_Connect, WIFI_SendData, ... (also pulls in es_wifi.h and es_wifi_io.h) */
-#if __has_include("wifi_secrets.h")
-#include "wifi_secrets.h"   /* WIFI_SSID, WIFI_PASSWORD, PEER_IP, UDP_PORT - not in git */
-#else
-#error "Missing Core/Inc/wifi_secrets.h: copy wifi_secrets_template.h to wifi_secrets.h and fill in your hotspot name and password."
-#endif
+#include "wifi.h"        /* SPI_WIFI_ISR() for the PE1 interrupt */
+#include "wifi_link.h"   /* audio link between the boards: wifi_link_init, _send_frame, _poll, ... */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-#define AUDIO_SAMPLES 160 // 20 ms of audio at 8 kHz
 
-typedef struct __attribute__((packed)) {
-  uint16_t seq; // packet counter
-  uint16_t nsamples; // samples in this packet
-  int16_t  samples[AUDIO_SAMPLES]; // audio (dummy data for now)
-} AudioPacket; // 324 bytes
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* PEER_IP and UDP_PORT come from wifi_secrets.h (each person sets their own). */
-#ifndef PEER_IP
-#error "PEER_IP missing: add  #define PEER_IP {a, b, c, d}  to Core/Inc/wifi_secrets.h (see wifi_secrets_template.h)"
-#endif
-#ifndef UDP_PORT
-#define UDP_PORT 5000
-#endif
-
-/* Wi-Fi test mode: TX = board sends packets to PEER_IP, RX = board receives packets on UDP_PORT. */
-#define WIFI_TEST_TX   0
-#define WIFI_TEST_RX   1
-#define WIFI_TEST_MODE WIFI_TEST_RX
+// Wi-Fi test mode, until the microphone and speaker are connected to wifi_link:
+//   WIFI_TEST_TX     = send dummy frames to PEER_IP
+//   WIFI_TEST_RX     = receive and print stats
+//   WIFI_TEST_SWITCH = switch RX <-> TX every 5 s (tests mode switching with one board + laptop)
+#define WIFI_TEST_TX 0
+#define WIFI_TEST_RX 1
+#define WIFI_TEST_SWITCH 2
+#define WIFI_TEST_MODE WIFI_TEST_SWITCH
+#define WIFI_TEST_SWITCH_PERIOD_MS 5000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -142,58 +129,44 @@ int main(void)
   MX_SPI3_Init();
   MX_DFSDM1_Init();
   /* USER CODE BEGIN 2 */
-  char msg[64];
+  char msg[96];
   uint8_t ip[4];
 
   log_uart("Wi-Fi init...\r\n");
-  if (WIFI_Init() != WIFI_STATUS_OK) { log_uart("init FAILED\r\n"); Error_Handler(); }
-
-  if (WIFI_Connect(WIFI_SSID, WIFI_PASSWORD, WIFI_ECN_WPA2_PSK) != WIFI_STATUS_OK) {
-    log_uart("connect FAILED\r\n"); Error_Handler();
+  WifiLinkStatus wl = wifi_link_init(); // starts in RX mode
+  if (wl != WIFI_LINK_OK) {
+    snprintf(msg, sizeof msg, "Wi-Fi FAILED (step %d), module replied: %.50s\r\n",
+             (int)wl, wifi_link_last_error());
+    log_uart(msg);
+    Error_Handler();
   }
-  WIFI_GetIP_Address(ip, 4);
-  snprintf(msg, sizeof msg, "Connected, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  wifi_link_get_ip(ip);
+  snprintf(msg, sizeof msg, "Wi-Fi ready, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
   log_uart(msg);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // LED2 on = connected
 
-  char fw[32];
-  if (WIFI_GetModuleFwRevision(fw, sizeof fw) == WIFI_STATUS_OK) {
-    snprintf(msg, sizeof msg, "Module firmware: %s\r\n", fw);
-    log_uart(msg);
-  }
+  static int16_t frame[WIFI_LINK_FRAME_SAMPLES];
+  uint32_t last_report = HAL_GetTick();
+  uint32_t last_switch = HAL_GetTick();
+  (void)last_switch; // only used in the SWITCH test
+  WifiLinkStats st, prev = {0};
 
-  static AudioPacket pkt;
-  char reply[96];
+  for (int i = 0; i < WIFI_LINK_FRAME_SAMPLES; i++) {
+    frame[i] = (int16_t)(i * 100); // dummy ramp, replaced by mic frames later
+  }
 
 #if WIFI_TEST_MODE == WIFI_TEST_TX
-  /* ---- TX test: send packets to PEER_IP ---- */
-  uint8_t peer_ip[4] = PEER_IP;
-  uint16_t sent_len;
-  uint32_t fails = 0;
-
-  /* UDP client: give a non-zero local port; the module can reject 0 for UDP. */
-  if (WIFI_OpenClientConnection(0, WIFI_UDP_PROTOCOL, "udp_tx", peer_ip, UDP_PORT, 5001) != WIFI_STATUS_OK) {
-    log_uart("UDP open FAILED, module replied: ");
-    snprintf(reply, sizeof reply, "%.80s\r\n", WIFI_GetLastResponse());
-    log_uart(reply);
+  wl = wifi_link_set_mode(WIFI_LINK_MODE_TX);
+  if (wl != WIFI_LINK_OK) {
+    snprintf(msg, sizeof msg, "TX mode FAILED (step %d): %.50s\r\n", (int)wl, wifi_link_last_error());
+    log_uart(msg);
     Error_Handler();
   }
-  log_uart("UDP open OK, sending...\r\n");
+  log_uart("TX test: sending frames...\r\n");
+#elif WIFI_TEST_MODE == WIFI_TEST_RX
+  log_uart("RX test: waiting for frames...\r\n");
 #else
-  /* ---- RX test: listen for packets on UDP_PORT (socket 1) ---- */
-  if (WIFI_StartServer(1, WIFI_UDP_PROTOCOL, 1, "udp_rx", UDP_PORT) != WIFI_STATUS_OK) {
-    log_uart("UDP server FAILED, module replied: ");
-    snprintf(reply, sizeof reply, "%.80s\r\n", WIFI_GetLastResponse());
-    log_uart(reply);
-    Error_Handler();
-  }
-  snprintf(msg, sizeof msg, "Listening on %d.%d.%d.%d port %d\r\n", ip[0], ip[1], ip[2], ip[3], UDP_PORT);
-  log_uart(msg);
-
-  uint16_t rx_len;
-  uint32_t rx_count = 0, rx_total = 0, rx_lost = 0, rx_bad = 0;
-  int32_t  expected = -1; /* next sequence number we expect, -1 = none yet */
-  uint32_t last_report = HAL_GetTick();
+  log_uart("SWITCH test: RX and TX alternate every 5 s\r\n");
 #endif
   /* USER CODE END 2 */
 
@@ -204,53 +177,41 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-#if WIFI_TEST_MODE == WIFI_TEST_TX
-	pkt.nsamples = AUDIO_SAMPLES;
-	for (int i = 0; i < AUDIO_SAMPLES; i++) {
-	  pkt.samples[i] = (int16_t)(i * 100); // dummy ramp, replaced by mic data later
-	}
-
-	if (WIFI_SendData(0, (uint8_t *)&pkt, sizeof pkt, &sent_len, 100) != WIFI_STATUS_OK || sent_len != sizeof pkt) {
-	  fails++;
-	  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LED flickers on errors
-	}
-	pkt.seq++;
-
-	if ((pkt.seq % 250) == 0) { // every 5 s, report on UART
-	  snprintf(msg, sizeof msg, "sent %u, send errors %lu\r\n", pkt.seq, fails);
-	  log_uart(msg);
-	}
-
-	HAL_Delay(20); // 50 packets/s, the real audio rate
-#else
-	/* Wait up to 50 ms for one packet. Returns OK with rx_len = 0 if nothing arrived. */
-	if (WIFI_ReceiveData(1, (uint8_t *)&pkt, sizeof pkt, &rx_len, 50) == WIFI_STATUS_OK && rx_len > 0) {
-	  if (rx_len != sizeof pkt) {
-	    rx_bad++; // wrong size: not one of our packets
-	  } else {
-	    rx_count++;
-	    rx_total++;
-	    if (expected >= 0 && pkt.seq != (uint16_t)expected) {
-	      uint16_t gap = (uint16_t)(pkt.seq - (uint16_t)expected);
-	      if (gap > 1000) { // huge jump = sender restarted
-	        log_uart("sender restarted, resetting loss count\r\n");
-	        rx_lost = 0;
-	      } else {
-	        rx_lost += gap; // packets that never arrived
-	      }
-	    }
-	    expected = (uint16_t)(pkt.seq + 1);
-	  }
-	}
-
-	if (HAL_GetTick() - last_report >= 1000) { // once per second 
-	  snprintf(msg, sizeof msg, "rx %lu pkt/s  total %lu  lost %lu  bad %lu\r\n",
-	           rx_count, rx_total, rx_lost, rx_bad);
-	  log_uart(msg);
-	  rx_count = 0;
-	  last_report += 1000;
-	}
+#if WIFI_TEST_MODE == WIFI_TEST_SWITCH
+    if (HAL_GetTick() - last_switch >= WIFI_TEST_SWITCH_PERIOD_MS) { // time to switch mode
+      WifiLinkMode next = (wifi_link_get_mode() == WIFI_LINK_MODE_RX) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
+      uint32_t t0 = HAL_GetTick();
+      wl = wifi_link_set_mode(next);
+      uint32_t took = HAL_GetTick() - t0;
+      if (wl != WIFI_LINK_OK) {
+        snprintf(msg, sizeof msg, "switch FAILED (step %d): %.50s\r\n", (int)wl, wifi_link_last_error());
+      } else {
+        snprintf(msg, sizeof msg, "---- switched to %s in %lu ms ----\r\n",
+                 next == WIFI_LINK_MODE_TX ? "TX" : "RX", took);
+      }
+      log_uart(msg);
+      last_switch = HAL_GetTick();
+    }
 #endif
+
+    if (wifi_link_get_mode() == WIFI_LINK_MODE_TX) {
+      wifi_link_send_frame(frame);
+      HAL_Delay(20); // about 50 frames/s, the audio rate
+    } else {
+      wifi_link_poll(frame, 10); // frame now holds the received audio
+    }
+
+    if (HAL_GetTick() - last_report >= 1000) { // stats once per second
+      int tx = (wifi_link_get_mode() == WIFI_LINK_MODE_TX);
+      wifi_link_get_stats(&st);
+      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  restarts %lu\r\n",
+               tx ? "TX" : "RX",
+               tx ? st.sent - prev.sent : st.received - prev.received,
+               st.sent, st.send_errors, st.received, st.lost, st.bad, st.restarts);
+      log_uart(msg);
+      prev = st;
+      last_report += 1000;
+    }
   }
   /* USER CODE END 3 */
 }
