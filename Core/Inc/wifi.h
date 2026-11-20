@@ -160,6 +160,8 @@ WIFI_Status_t WIFI_SetModuleDefault(void);
 WIFI_Status_t WIFI_ModuleFirmwareUpdate(const char *url);
 WIFI_Status_t WIFI_GetModuleID(char *Id, uint8_t IdLength);
 WIFI_Status_t WIFI_GetModuleFwRevision(char *rev, uint8_t RevLength);
+/* Added for debugging: text of the module's reply to the last AT command. */
+const char *WIFI_GetLastResponse(void);
 WIFI_Status_t WIFI_GetModuleName(char *ModuleName, uint8_t ModuleNameLength);
 #ifdef __cplusplus
 }

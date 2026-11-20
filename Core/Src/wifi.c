@@ -651,3 +651,9 @@ WIFI_Status_t WIFI_GetModuleName(char *ModuleName, uint8_t ModuleNameLen)
 
   return ret;
 }
+
+/* Added for debugging: the module's reply to the last AT command (for example "ERROR"). */
+const char *WIFI_GetLastResponse(void)
+{
+  return (const char *)EsWifiObj.CmdData;
+}

@@ -25,7 +25,7 @@
 #include <string.h>
 #include "wifi.h"      /* WIFI_Init, WIFI_Connect, WIFI_SendData, ... (also pulls in es_wifi.h and es_wifi_io.h) */
 #if __has_include("wifi_secrets.h")
-#include "wifi_secrets.h"   /* WIFI_SSID, WIFI_PASSWORD - not in git */
+#include "wifi_secrets.h"   /* WIFI_SSID, WIFI_PASSWORD, PEER_IP, UDP_PORT - not in git */
 #else
 #error "Missing Core/Inc/wifi_secrets.h: copy wifi_secrets_template.h to wifi_secrets.h and fill in your hotspot name and password."
 #endif
@@ -33,12 +33,24 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define AUDIO_SAMPLES 160 // 20 ms of audio at 8 kHz
 
+typedef struct __attribute__((packed)) {
+  uint16_t seq; // packet counter
+  uint16_t nsamples; // samples in this packet
+  int16_t  samples[AUDIO_SAMPLES]; // audio (dummy data for now)
+} AudioPacket; // 324 bytes
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* PEER_IP and UDP_PORT come from wifi_secrets.h (each person sets their own). */
+#ifndef PEER_IP
+#error "PEER_IP missing: add  #define PEER_IP {a, b, c, d}  to Core/Inc/wifi_secrets.h (see wifi_secrets_template.h)"
+#endif
+#ifndef UDP_PORT
+#define UDP_PORT 5000
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -138,6 +150,27 @@ int main(void)
   snprintf(msg, sizeof msg, "Connected, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
   log_uart(msg);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);   // LED2 on = connected
+
+  uint8_t peer_ip[4] = PEER_IP;
+  char fw[32];
+  if (WIFI_GetModuleFwRevision(fw, sizeof fw) == WIFI_STATUS_OK) {
+    snprintf(msg, sizeof msg, "Module firmware: %s\r\n", fw);
+    log_uart(msg);
+  }
+
+  /* UDP client: give a non-zero local port; the module can reject 0 for UDP. */
+  if (WIFI_OpenClientConnection(0, WIFI_UDP_PROTOCOL, "udp_tx", peer_ip, UDP_PORT, 5001) != WIFI_STATUS_OK) {
+    log_uart("UDP open FAILED, module replied: ");
+    char reply[96];
+    snprintf(reply, sizeof reply, "%.80s\r\n", WIFI_GetLastResponse());
+    log_uart(reply);
+    Error_Handler();
+  }
+  log_uart("UDP open OK, sending...\r\n");
+
+  static AudioPacket pkt;
+  uint16_t sent_len;
+  uint32_t fails = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -147,6 +180,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	pkt.nsamples = AUDIO_SAMPLES;
+	for (int i = 0; i < AUDIO_SAMPLES; i++) {
+	  pkt.samples[i] = (int16_t)(i * 100);      // dummy ramp, replaced by mic data later
+	}
+
+	if (WIFI_SendData(0, (uint8_t *)&pkt, sizeof pkt, &sent_len, 100) != WIFI_STATUS_OK
+		|| sent_len != sizeof pkt) {
+	  fails++;
+	  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);   // LED flickers on errors
+	}
+	pkt.seq++;
+
+	if ((pkt.seq % 250) == 0) {                 // every ~5 s, report on UART
+	  snprintf(msg, sizeof msg, "sent %u, send errors %lu\r\n", pkt.seq, fails);
+	  log_uart(msg);
+	}
+
+	HAL_Delay(20);                              // 50 packets/s, the real audio rate
   }
   /* USER CODE END 3 */
 }
