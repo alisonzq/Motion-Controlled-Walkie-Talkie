@@ -57,12 +57,17 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define btn_Pin GPIO_PIN_13
+#define btn_GPIO_Port GPIOC
+#define btn_EXTI_IRQn EXTI15_10_IRQn
 #define WIFI_RST_Pin GPIO_PIN_8
 #define WIFI_RST_GPIO_Port GPIOE
 #define WIFI_BOOT0_Pin GPIO_PIN_12
 #define WIFI_BOOT0_GPIO_Port GPIOB
 #define WIFI_WAKEUP_Pin GPIO_PIN_13
 #define WIFI_WAKEUP_GPIO_Port GPIOB
+#define led_Pin GPIO_PIN_14
+#define led_GPIO_Port GPIOB
 #define BLE_CS_Pin GPIO_PIN_13
 #define BLE_CS_GPIO_Port GPIOD
 #define WIFI_CS_Pin GPIO_PIN_0
