@@ -21,7 +21,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include "wifi.h"      /* WIFI_Init, WIFI_Connect, WIFI_SendData, ... (also pulls in es_wifi.h and es_wifi_io.h) */
+#if __has_include("wifi_secrets.h")
+#include "wifi_secrets.h"   /* WIFI_SSID, WIFI_PASSWORD - not in git */
+#else
+#error "Missing Core/Inc/wifi_secrets.h: copy wifi_secrets_template.h to wifi_secrets.h and fill in your hotspot name and password."
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,7 +69,10 @@ static void MX_SPI3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+static void log_uart(const char *s)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
+}
 /* USER CODE END 0 */
 
 /**
@@ -73,8 +83,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-	extern SPI_HandleTypeDef hspi;   // the Wi-Fi driver's handle
-	void SPI3_IRQHandler(void) { HAL_SPI_IRQHandler(&hspi); }
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -99,7 +108,19 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
+  char msg[64];
+  uint8_t ip[4];
 
+  log_uart("Wi-Fi init...\r\n");
+  if (WIFI_Init() != WIFI_STATUS_OK) { log_uart("init FAILED\r\n"); Error_Handler(); }
+
+  if (WIFI_Connect(WIFI_SSID, WIFI_PASSWORD, WIFI_ECN_WPA2_PSK) != WIFI_STATUS_OK) {
+    log_uart("connect FAILED\r\n"); Error_Handler();
+  }
+  WIFI_GetIP_Address(ip, 4);
+  snprintf(msg, sizeof msg, "Connected, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  log_uart(msg);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);   // LED2 on = connected
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -315,12 +336,19 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, WIFI_RST_Pin|WIFI_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(WIFI_RST_GPIO_Port, WIFI_RST_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, WIFI_BOOT0_Pin|WIFI_WAKEUP_Pin|GPIO_PIN_14, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(BLE_CS_GPIO_Port, BLE_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(WIFI_CS_GPIO_Port, WIFI_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
@@ -342,6 +370,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : BLE_CS_Pin */
+  GPIO_InitStruct.Pin = BLE_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BLE_CS_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PE1 */
   GPIO_InitStruct.Pin = GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
@@ -361,7 +396,25 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* Wi-Fi module: SPI3 interrupt. The driver (es_wifi_io.c) owns its own handle, hspi. */
+extern SPI_HandleTypeDef hspi;
+void SPI3_IRQHandler(void)
+{
+  HAL_SPI_IRQHandler(&hspi);
+}
 
+/* All EXTI lines end up here. Add the push-button (PC13) handling below. */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_1)        /* PE1: Wi-Fi module data ready */
+  {
+    SPI_WIFI_ISR();
+  }
+  else if (GPIO_Pin == GPIO_PIN_13)  /* PC13: blue push-button */
+  {
+    /* TODO: toggle transmit / receive */
+  }
+}
 /* USER CODE END 4 */
 
 /**

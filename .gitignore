@@ -5,3 +5,6 @@ Release/
 # OS clutter
 Thumbs.db
 .DS_Store
+
+# Wi-Fi credentials (copy wifi_secrets_template.h to create it)
+Core/Inc/wifi_secrets.h

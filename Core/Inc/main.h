@@ -63,6 +63,8 @@ void Error_Handler(void);
 #define WIFI_BOOT0_GPIO_Port GPIOB
 #define WIFI_WAKEUP_Pin GPIO_PIN_13
 #define WIFI_WAKEUP_GPIO_Port GPIOB
+#define BLE_CS_Pin GPIO_PIN_13
+#define BLE_CS_GPIO_Port GPIOD
 #define WIFI_CS_Pin GPIO_PIN_0
 #define WIFI_CS_GPIO_Port GPIOE
 
