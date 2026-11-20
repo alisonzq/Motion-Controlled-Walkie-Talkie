@@ -129,7 +129,7 @@ int main(void)
   MX_SPI3_Init();
   MX_DFSDM1_Init();
   /* USER CODE BEGIN 2 */
-  char msg[96];
+  char msg[128];
   uint8_t ip[4];
 
   log_uart("Wi-Fi init...\r\n");
@@ -142,6 +142,14 @@ int main(void)
   }
   wifi_link_get_ip(ip);
   snprintf(msg, sizeof msg, "Wi-Fi ready, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  log_uart(msg);
+  log_uart("Looking for the other board...\r\n");
+  if (wifi_link_find_peer(30000) == WIFI_LINK_OK) { // up to 30 s
+    wifi_link_get_peer_ip(ip);
+    snprintf(msg, sizeof msg, "Found the other board: %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  } else {
+    snprintf(msg, sizeof msg, "No other board found (TX will fail until it appears)\r\n");
+  }
   log_uart(msg);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // LED2 on = connected
 
@@ -177,8 +185,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // Keep the Wi-Fi link alive (rejoins the hotspot if it dropped us)
+    WifiLinkWatchdog wd = wifi_link_watchdog();
+    if (wd == WIFI_LINK_WD_RECONNECTED) {
+      uint8_t peer[4];
+      wifi_link_get_ip(ip);
+      wifi_link_get_peer_ip(peer);
+      snprintf(msg, sizeof msg, "!! Wi-Fi link lost and back: IP %d.%d.%d.%d, peer %d.%d.%d.%d, mode %s\r\n",
+               ip[0], ip[1], ip[2], ip[3], peer[0], peer[1], peer[2], peer[3],
+               wifi_link_get_mode() == WIFI_LINK_MODE_TX ? "TX" : "RX");
+      log_uart(msg);
+    } else if (wd == WIFI_LINK_WD_DOWN) {
+      snprintf(msg, sizeof msg, "!! Wi-Fi link lost, rejoin failed (%.40s), retrying in 3 s\r\n", wifi_link_last_error());
+      log_uart(msg);
+    }
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, wifi_link_is_up() ? GPIO_PIN_SET : GPIO_PIN_RESET); // LED2 = link up
+
 #if WIFI_TEST_MODE == WIFI_TEST_SWITCH
-    if (HAL_GetTick() - last_switch >= WIFI_TEST_SWITCH_PERIOD_MS) { // time to switch mode
+    if (wifi_link_is_up() && HAL_GetTick() - last_switch >= WIFI_TEST_SWITCH_PERIOD_MS) { // time to switch mode
       WifiLinkMode next = (wifi_link_get_mode() == WIFI_LINK_MODE_RX) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
       uint32_t t0 = HAL_GetTick();
       wl = wifi_link_set_mode(next);
@@ -208,10 +232,11 @@ int main(void)
     if (HAL_GetTick() - last_report >= 1000) { // stats once per second
       int tx = (wifi_link_get_mode() == WIFI_LINK_MODE_TX);
       wifi_link_get_stats(&st);
-      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  flushed %lu\r\n",
+      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  flushed %lu  reconn %lu\r\n",
                tx ? "TX" : "RX",
                tx ? st.sent - prev.sent : st.received - prev.received,
-               st.sent, st.send_errors, st.received, st.lost, st.bad, st.flushed);
+               st.sent, st.send_errors, st.received, st.lost, st.bad, st.flushed,
+               st.reconnects);
       log_uart(msg);
       prev = st;
       last_report += 1000;

@@ -657,3 +657,14 @@ const char *WIFI_GetLastResponse(void)
 {
   return (const char *)EsWifiObj.CmdData;
 }
+
+/* Added: the network's subnet mask, as given by the hotspot when we connected. */
+WIFI_Status_t WIFI_GetNetmask(uint8_t *mask, uint8_t MaskLength)
+{
+  if ((mask == NULL) || (MaskLength < 4) || (ES_WIFI_IsConnected(&EsWifiObj) != 1))
+  {
+    return WIFI_STATUS_ERROR;
+  }
+  memcpy(mask, EsWifiObj.NetSettings.IP_Mask, 4);
+  return WIFI_STATUS_OK;
+}
