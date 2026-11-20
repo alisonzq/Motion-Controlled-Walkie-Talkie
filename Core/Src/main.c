@@ -51,6 +51,11 @@ typedef struct __attribute__((packed)) {
 #ifndef UDP_PORT
 #define UDP_PORT 5000
 #endif
+
+/* Wi-Fi test mode: TX = board sends packets to PEER_IP, RX = board receives packets on UDP_PORT. */
+#define WIFI_TEST_TX   0
+#define WIFI_TEST_RX   1
+#define WIFI_TEST_MODE WIFI_TEST_RX
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -149,28 +154,47 @@ int main(void)
   WIFI_GetIP_Address(ip, 4);
   snprintf(msg, sizeof msg, "Connected, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
   log_uart(msg);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);   // LED2 on = connected
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // LED2 on = connected
 
-  uint8_t peer_ip[4] = PEER_IP;
   char fw[32];
   if (WIFI_GetModuleFwRevision(fw, sizeof fw) == WIFI_STATUS_OK) {
     snprintf(msg, sizeof msg, "Module firmware: %s\r\n", fw);
     log_uart(msg);
   }
 
+  static AudioPacket pkt;
+  char reply[96];
+
+#if WIFI_TEST_MODE == WIFI_TEST_TX
+  /* ---- TX test: send packets to PEER_IP ---- */
+  uint8_t peer_ip[4] = PEER_IP;
+  uint16_t sent_len;
+  uint32_t fails = 0;
+
   /* UDP client: give a non-zero local port; the module can reject 0 for UDP. */
   if (WIFI_OpenClientConnection(0, WIFI_UDP_PROTOCOL, "udp_tx", peer_ip, UDP_PORT, 5001) != WIFI_STATUS_OK) {
     log_uart("UDP open FAILED, module replied: ");
-    char reply[96];
     snprintf(reply, sizeof reply, "%.80s\r\n", WIFI_GetLastResponse());
     log_uart(reply);
     Error_Handler();
   }
   log_uart("UDP open OK, sending...\r\n");
+#else
+  /* ---- RX test: listen for packets on UDP_PORT (socket 1) ---- */
+  if (WIFI_StartServer(1, WIFI_UDP_PROTOCOL, 1, "udp_rx", UDP_PORT) != WIFI_STATUS_OK) {
+    log_uart("UDP server FAILED, module replied: ");
+    snprintf(reply, sizeof reply, "%.80s\r\n", WIFI_GetLastResponse());
+    log_uart(reply);
+    Error_Handler();
+  }
+  snprintf(msg, sizeof msg, "Listening on %d.%d.%d.%d port %d\r\n", ip[0], ip[1], ip[2], ip[3], UDP_PORT);
+  log_uart(msg);
 
-  static AudioPacket pkt;
-  uint16_t sent_len;
-  uint32_t fails = 0;
+  uint16_t rx_len;
+  uint32_t rx_count = 0, rx_total = 0, rx_lost = 0, rx_bad = 0;
+  int32_t  expected = -1; /* next sequence number we expect, -1 = none yet */
+  uint32_t last_report = HAL_GetTick();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -180,24 +204,53 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if WIFI_TEST_MODE == WIFI_TEST_TX
 	pkt.nsamples = AUDIO_SAMPLES;
 	for (int i = 0; i < AUDIO_SAMPLES; i++) {
-	  pkt.samples[i] = (int16_t)(i * 100);      // dummy ramp, replaced by mic data later
+	  pkt.samples[i] = (int16_t)(i * 100); // dummy ramp, replaced by mic data later
 	}
 
-	if (WIFI_SendData(0, (uint8_t *)&pkt, sizeof pkt, &sent_len, 100) != WIFI_STATUS_OK
-		|| sent_len != sizeof pkt) {
+	if (WIFI_SendData(0, (uint8_t *)&pkt, sizeof pkt, &sent_len, 100) != WIFI_STATUS_OK || sent_len != sizeof pkt) {
 	  fails++;
-	  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);   // LED flickers on errors
+	  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LED flickers on errors
 	}
 	pkt.seq++;
 
-	if ((pkt.seq % 250) == 0) {                 // every ~5 s, report on UART
+	if ((pkt.seq % 250) == 0) { // every 5 s, report on UART
 	  snprintf(msg, sizeof msg, "sent %u, send errors %lu\r\n", pkt.seq, fails);
 	  log_uart(msg);
 	}
 
-	HAL_Delay(20);                              // 50 packets/s, the real audio rate
+	HAL_Delay(20); // 50 packets/s, the real audio rate
+#else
+	/* Wait up to 50 ms for one packet. Returns OK with rx_len = 0 if nothing arrived. */
+	if (WIFI_ReceiveData(1, (uint8_t *)&pkt, sizeof pkt, &rx_len, 50) == WIFI_STATUS_OK && rx_len > 0) {
+	  if (rx_len != sizeof pkt) {
+	    rx_bad++; // wrong size: not one of our packets
+	  } else {
+	    rx_count++;
+	    rx_total++;
+	    if (expected >= 0 && pkt.seq != (uint16_t)expected) {
+	      uint16_t gap = (uint16_t)(pkt.seq - (uint16_t)expected);
+	      if (gap > 1000) { // huge jump = sender restarted
+	        log_uart("sender restarted, resetting loss count\r\n");
+	        rx_lost = 0;
+	      } else {
+	        rx_lost += gap; // packets that never arrived
+	      }
+	    }
+	    expected = (uint16_t)(pkt.seq + 1);
+	  }
+	}
+
+	if (HAL_GetTick() - last_report >= 1000) { // once per second 
+	  snprintf(msg, sizeof msg, "rx %lu pkt/s  total %lu  lost %lu  bad %lu\r\n",
+	           rx_count, rx_total, rx_lost, rx_bad);
+	  log_uart(msg);
+	  rx_count = 0;
+	  last_report += 1000;
+	}
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -534,21 +587,20 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* Wi-Fi module: SPI3 interrupt. The driver (es_wifi_io.c) owns its own handle, hspi. */
+/* Wi-Fi module: SPI3 interrupt. */
 extern SPI_HandleTypeDef hspi;
 void SPI3_IRQHandler(void)
 {
   HAL_SPI_IRQHandler(&hspi);
 }
 
-/* All EXTI lines end up here. Add the push-button (PC13) handling below. */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_1)        /* PE1: Wi-Fi module data ready */
+  if (GPIO_Pin == GPIO_PIN_1) /* PE1: Wi-Fi module data ready */
   {
     SPI_WIFI_ISR();
   }
-  else if (GPIO_Pin == GPIO_PIN_13)  /* PC13: blue push-button */
+  else if (GPIO_Pin == GPIO_PIN_13) /* PC13: blue push-button */
   {
 		HAL_GPIO_TogglePin(led_GPIO_Port, led_Pin);
 		switch(state){

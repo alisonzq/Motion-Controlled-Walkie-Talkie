@@ -1936,8 +1936,16 @@ ES_WIFI_Status_t ES_WIFI_StartServerSingleConn(ES_WIFIObject_t *Obj, ES_WIFI_Con
         ret = AT_ExecuteCommand(Obj, Obj->CmdData, Obj->CmdData);
         if (ret == ES_WIFI_STATUS_OK)
         {
-          /* multi accept mode */
-          sprintf((char*)Obj->CmdData,"P5=11\r");
+          /* start the server: UDP uses plain start (P5=1); "multi accept" (P5=11) is TCP-only
+             and the module rejects it for UDP */
+          if ((conn->Type == ES_WIFI_UDP_CONNECTION) || (conn->Type == ES_WIFI_UDP_LITE_CONNECTION))
+          {
+            sprintf((char*)Obj->CmdData,"P5=1\r");
+          }
+          else
+          {
+            sprintf((char*)Obj->CmdData,"P5=11\r");   /* multi accept mode */
+          }
           ret = AT_ExecuteCommand(Obj, Obj->CmdData, Obj->CmdData);
 
  #if (ES_WIFI_USE_UART == 1)
