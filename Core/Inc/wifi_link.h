@@ -46,6 +46,7 @@ typedef struct {
   uint32_t lost; // frames missing, from gaps in the sequence numbers
   uint32_t bad; // packets of the wrong size or format
   uint32_t restarts; // times the other board restarted (sequence jumped back)
+  uint32_t flushed; // old packets thrown away when switching to RX
 } WifiLinkStats;
 
 // Start the module, join the hotspot and start in RX mode. Call once at startup.
@@ -55,6 +56,9 @@ WifiLinkStatus wifi_link_init(void);
    Returns WIFI_LINK_OK, or WIFI_LINK_ERR_TX_OPEN / WIFI_LINK_ERR_RX_OPEN. */
 WifiLinkStatus wifi_link_set_mode(WifiLinkMode mode);
 WifiLinkMode wifi_link_get_mode(void);
+
+// How long the last wifi_link_set_mode() took: closing the old socket, opening the new one (ms).
+void wifi_link_get_switch_timing(uint32_t *close_ms, uint32_t *open_ms);
 
 /* TX mode only: send one frame of WIFI_LINK_FRAME_SAMPLES samples.
    Returns 1 on success, 0 on failure (or if not in TX mode). */

@@ -4,15 +4,21 @@
  * Audio link between the two walkie-talkie boards over Wi-Fi (UDP).
  * See wifi_link.h for how to use it.
  *
- * Sockets on the Wi-Fi module (only one is open at a time, see wifi_link_set_mode):
- *   TX mode, socket 0 : UDP client, sends to PEER_IP:UDP_PORT (from local port WIFI_LINK_TX_LOCAL_PORT)
- *   RX mode, socket 1 : UDP server, receives on UDP_PORT
+ * Sockets on the Wi-Fi module:
+ *   socket 0 : UDP client, sends to PEER_IP:PEER_PORT (from local port WIFI_LINK_TX_LOCAL_PORT), open in TX mode
+ *   socket 1 : UDP server, receives on UDP_PORT
+ *
+ * Stopping the UDP server takes ~500 ms in the module, which would delay every
+ * switch to TX. So when switching to TX we first try to open the client while the
+ * server stays open (packets that arrive meanwhile are flushed on the way back to RX).
+ * If the module refuses that, we fall back to stopping the server first.
  *
  * Note: es_wifi.c has two local fixes that UDP depends on (remote IP/port for UDP
  * clients, P5=1 for UDP servers). Keep them if the driver files are replaced.
  */
 #include "wifi_link.h"
 #include "wifi.h"
+#include "main.h" // HAL_GetTick
 #include <string.h>
 
 #if __has_include("wifi_secrets.h")
@@ -25,15 +31,18 @@
 #error "PEER_IP missing: add  #define PEER_IP {a, b, c, d}  to Core/Inc/wifi_secrets.h"
 #endif
 #ifndef UDP_PORT
-#define UDP_PORT 5000
+#define UDP_PORT 5000 // port this board listens on
+#endif
+#ifndef PEER_PORT
+#define PEER_PORT UDP_PORT // port the other side listens on
 #endif
 
 #define WIFI_LINK_TX_SOCKET      0
 #define WIFI_LINK_RX_SOCKET      1
-#define WIFI_LINK_TX_LOCAL_PORT  5001 // the module rejects local port 0 for UDP
+#define WIFI_LINK_TX_LOCAL_PORT  5002 // the module rejects local port 0 for UDP; keep it different from UDP_PORT/PEER_PORT
 #define WIFI_LINK_SEND_TIMEOUT   100 // ms
 #define WIFI_LINK_RESTART_GAP    1000 // a sequence jump this big means the sender restarted
-#define WIFI_LINK_FLUSH_MAX      64 // max packets thrown away per flush
+#define WIFI_LINK_FLUSH_MAX_MS   150 // a flush stops after this long even if packets keep coming
 
 // What goes over the air: 4-byte header + audio, 324 bytes in total.
 typedef struct __attribute__((packed)) {
@@ -49,30 +58,47 @@ static uint16_t      tx_seq;
 static int32_t       rx_expected = -1; // next sequence number expected, -1 = none yet
 static uint8_t       my_ip[4];
 static WifiLinkMode  mode = WIFI_LINK_MODE_RX;
-static int           socket_open = 0; // is the socket for the current mode open?
+static int           rx_open = 0; // UDP server (socket 1) is running
+static int           tx_open = 0; // UDP client (socket 0) is open
+static uint32_t      switch_close_ms, switch_open_ms; // how long the last mode switch took, per step
 
-static WifiLinkStatus open_socket(WifiLinkMode m)
+static WifiLinkStatus open_tx(void)
 {
-  if (m == WIFI_LINK_MODE_TX) {
-    uint8_t peer_ip[4] = PEER_IP;
-    if (WIFI_OpenClientConnection(WIFI_LINK_TX_SOCKET, WIFI_UDP_PROTOCOL, "wl_tx",
-                                  peer_ip, UDP_PORT, WIFI_LINK_TX_LOCAL_PORT) != WIFI_STATUS_OK) {
-      return WIFI_LINK_ERR_TX_OPEN;
-    }
-  } else {
-    if (WIFI_StartServer(WIFI_LINK_RX_SOCKET, WIFI_UDP_PROTOCOL, 1, "wl_rx", UDP_PORT) != WIFI_STATUS_OK) {
-      return WIFI_LINK_ERR_RX_OPEN;
-    }
-    rx_expected = -1; // new listening session: don't count the gap as loss
+  uint8_t peer_ip[4] = PEER_IP;
+  if (WIFI_OpenClientConnection(WIFI_LINK_TX_SOCKET, WIFI_UDP_PROTOCOL, "wl_tx",
+                                peer_ip, PEER_PORT, WIFI_LINK_TX_LOCAL_PORT) != WIFI_STATUS_OK) {
+    return WIFI_LINK_ERR_TX_OPEN;
   }
+  tx_open = 1;
   return WIFI_LINK_OK;
 }
 
-static WifiLinkStatus close_socket(WifiLinkMode m)
+static WifiLinkStatus close_tx(void)
 {
-  WIFI_Status_t r = (m == WIFI_LINK_MODE_TX) ? WIFI_CloseClientConnection(WIFI_LINK_TX_SOCKET)
-                                             : WIFI_StopServer(WIFI_LINK_RX_SOCKET);
-  return (r == WIFI_STATUS_OK) ? WIFI_LINK_OK : WIFI_LINK_ERR_CLOSE;
+  if (WIFI_CloseClientConnection(WIFI_LINK_TX_SOCKET) != WIFI_STATUS_OK) {
+    return WIFI_LINK_ERR_CLOSE;
+  }
+  tx_open = 0;
+  return WIFI_LINK_OK;
+}
+
+static WifiLinkStatus open_rx(void)
+{
+  if (WIFI_StartServer(WIFI_LINK_RX_SOCKET, WIFI_UDP_PROTOCOL, 1, "wl_rx", UDP_PORT) != WIFI_STATUS_OK) {
+    return WIFI_LINK_ERR_RX_OPEN;
+  }
+  rx_open = 1;
+  rx_expected = -1; // new listening session: don't count the gap as loss
+  return WIFI_LINK_OK;
+}
+
+static WifiLinkStatus close_rx(void)
+{
+  if (WIFI_StopServer(WIFI_LINK_RX_SOCKET) != WIFI_STATUS_OK) {
+    return WIFI_LINK_ERR_CLOSE;
+  }
+  rx_open = 0;
+  return WIFI_LINK_OK;
 }
 
 WifiLinkStatus wifi_link_init(void)
@@ -87,26 +113,57 @@ WifiLinkStatus wifi_link_init(void)
 
   wifi_link_reset_stats();
   mode = WIFI_LINK_MODE_RX;
-  WifiLinkStatus s = open_socket(mode);
-  socket_open = (s == WIFI_LINK_OK);
-  return s;
+  return open_rx();
 }
 
 WifiLinkStatus wifi_link_set_mode(WifiLinkMode new_mode)
 {
-  if (new_mode == mode && socket_open) {
-    return WIFI_LINK_OK; // already there
-  }
-  if (socket_open) {
-    WifiLinkStatus s = close_socket(mode);
-    if (s != WIFI_LINK_OK) {
-      return s;
+  WifiLinkStatus s = WIFI_LINK_OK;
+  uint32_t t;
+
+  switch_close_ms = 0;
+  switch_open_ms = 0;
+
+  if (new_mode == WIFI_LINK_MODE_TX) {
+    if (!tx_open) {
+      t = HAL_GetTick();
+      s = open_tx();                         // fast path: keep the server open
+      switch_open_ms = HAL_GetTick() - t;
+      if (s != WIFI_LINK_OK && rx_open) {    // module refused both at once: stop the server first
+        t = HAL_GetTick();
+        s = close_rx();
+        switch_close_ms = HAL_GetTick() - t;
+        if (s != WIFI_LINK_OK) {
+          return s;
+        }
+        t = HAL_GetTick();
+        s = open_tx();
+        switch_open_ms += HAL_GetTick() - t;
+      }
     }
-    socket_open = 0;
+  } else {
+    if (tx_open) {
+      t = HAL_GetTick();
+      s = close_tx();
+      switch_close_ms = HAL_GetTick() - t;
+      if (s != WIFI_LINK_OK) {
+        return s;
+      }
+    }
+    t = HAL_GetTick();
+    if (rx_open) {
+      mode = WIFI_LINK_MODE_RX;
+      wifi_link_flush();                     // drop what piled up while we were sending
+      rx_expected = -1;
+    } else {
+      s = open_rx();
+    }
+    switch_open_ms = HAL_GetTick() - t;
   }
-  mode = new_mode;
-  WifiLinkStatus s = open_socket(mode);
-  socket_open = (s == WIFI_LINK_OK);
+
+  if (s == WIFI_LINK_OK) {
+    mode = new_mode;
+  }
   return s;
 }
 
@@ -115,11 +172,17 @@ WifiLinkMode wifi_link_get_mode(void)
   return mode;
 }
 
+void wifi_link_get_switch_timing(uint32_t *close_ms, uint32_t *open_ms)
+{
+  *close_ms = switch_close_ms;
+  *open_ms = switch_open_ms;
+}
+
 int wifi_link_send_frame(const int16_t *samples)
 {
   uint16_t sent_len = 0;
 
-  if (mode != WIFI_LINK_MODE_TX || !socket_open) {
+  if (mode != WIFI_LINK_MODE_TX || !tx_open) {
     return 0;
   }
 
@@ -141,7 +204,7 @@ int wifi_link_poll(int16_t *samples, uint32_t timeout_ms)
 {
   uint16_t rx_len = 0;
 
-  if (mode != WIFI_LINK_MODE_RX || !socket_open) {
+  if (mode != WIFI_LINK_MODE_RX || !rx_open) {
     return 0;
   }
   if (timeout_ms == 0) {
@@ -178,14 +241,18 @@ void wifi_link_flush(void)
 {
   uint16_t rx_len;
 
-  if (mode != WIFI_LINK_MODE_RX || !socket_open) {
+  if (mode != WIFI_LINK_MODE_RX || !rx_open) {
     return;
   }
-  for (int i = 0; i < WIFI_LINK_FLUSH_MAX; i++) {
+  // Read and throw away until the queue is empty (or the time limit is reached,
+  // so a sender that never stops cannot keep us here forever).
+  uint32_t start = HAL_GetTick();
+  while (HAL_GetTick() - start < WIFI_LINK_FLUSH_MAX_MS) {
     if (WIFI_ReceiveData(WIFI_LINK_RX_SOCKET, (uint8_t *)&rx_pkt, sizeof rx_pkt,
                          &rx_len, 1) != WIFI_STATUS_OK || rx_len == 0) {
-      break; // nothing left
+      break; // queue is empty
     }
+    stats.flushed++;
   }
   rx_expected = -1; // don't count the thrown-away packets as lost
 }

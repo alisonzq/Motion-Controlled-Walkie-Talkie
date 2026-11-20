@@ -14,6 +14,10 @@
 /* Where to send UDP packets: your laptop now, the other board later.
    Check the laptop's IPv4 with ipconfig (it changes between hotspot sessions). */
 #define PEER_IP        {192, 168, 1, 100}
-#define UDP_PORT       5000
+#define UDP_PORT       5000   // this board listens here
+#define PEER_PORT      5001   // the other side listens here
+/* Use different ports on the two boards:
+     board A: UDP_PORT 5000, PEER_PORT 5001
+     board B: UDP_PORT 5001, PEER_PORT 5000 */
 
 #endif /* WIFI_SECRETS_H */

@@ -186,8 +186,12 @@ int main(void)
       if (wl != WIFI_LINK_OK) {
         snprintf(msg, sizeof msg, "switch FAILED (step %d): %.50s\r\n", (int)wl, wifi_link_last_error());
       } else {
-        snprintf(msg, sizeof msg, "---- switched to %s in %lu ms ----\r\n",
-                 next == WIFI_LINK_MODE_TX ? "TX" : "RX", took);
+        uint32_t close_ms, open_ms;
+        wifi_link_get_switch_timing(&close_ms, &open_ms);
+        snprintf(msg, sizeof msg, "---- switched to %s in %lu ms (close %s %lu ms, open %s %lu ms) ----\r\n",
+                 next == WIFI_LINK_MODE_TX ? "TX" : "RX", took,
+                 next == WIFI_LINK_MODE_TX ? "RX" : "TX", close_ms,
+                 next == WIFI_LINK_MODE_TX ? "TX" : "RX", open_ms);
       }
       log_uart(msg);
       last_switch = HAL_GetTick();
@@ -204,10 +208,10 @@ int main(void)
     if (HAL_GetTick() - last_report >= 1000) { // stats once per second
       int tx = (wifi_link_get_mode() == WIFI_LINK_MODE_TX);
       wifi_link_get_stats(&st);
-      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  restarts %lu\r\n",
+      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  flushed %lu\r\n",
                tx ? "TX" : "RX",
                tx ? st.sent - prev.sent : st.received - prev.received,
-               st.sent, st.send_errors, st.received, st.lost, st.bad, st.restarts);
+               st.sent, st.send_errors, st.received, st.lost, st.bad, st.flushed);
       log_uart(msg);
       prev = st;
       last_report += 1000;
