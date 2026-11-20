@@ -1,0 +1,7 @@
+# CubeIDE build output
+Debug/
+Release/
+
+# OS clutter
+Thumbs.db
+.DS_Store
