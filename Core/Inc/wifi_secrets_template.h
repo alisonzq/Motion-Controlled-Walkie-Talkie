@@ -11,12 +11,12 @@
 #define WIFI_SSID      "YourHotspotName"
 #define WIFI_PASSWORD  "YourHotspotPassword"
 
-/* Where to send UDP packets: your laptop now, the other board later.
-   Check the laptop's IPv4 with ipconfig (it changes between hotspot sessions). */
-#define PEER_IP        {192, 168, 1, 100}   // used only if PEER_DISCOVERY is not defined
-#define PEER_DISCOVERY 1                     // find the other board automatically (no IP needed); remove to use PEER_IP
-#define UDP_PORT       5000   // this board listens here
-#define PEER_PORT      5001   // the other side listens here
+/* The other board's IP (or the laptop's for tests). Each board prints its own IP at startup:
+   flash both, read the IPs from the serial terminal, put each one in the OTHER board's file.
+   The hotspot usually gives a device the same IP again, but check if nothing arrives. */
+#define PEER_IP {192, 168, 1, 100}
+#define UDP_PORT 5000   // this board listens here
+#define PEER_PORT 5001   // the other side listens here
 /* Use different ports on the two boards:
      board A: UDP_PORT 5000, PEER_PORT 5001
      board B: UDP_PORT 5001, PEER_PORT 5000 */
