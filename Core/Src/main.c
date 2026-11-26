@@ -64,7 +64,7 @@ static volatile enum {
 	TRANSMITTING
 } state ;
 
-int32_t microphone_buffer[64] ;
+int32_t microphone_buffer[320] ;
 
 // audio frames for the Wi-Fi link: 160 int16 samples = 20 ms at 8 kHz
 int16_t mic_frame[WIFI_LINK_FRAME_SAMPLES]; // mic code fills this
@@ -588,6 +588,27 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		}
   }
 }
+
+void HAL_DFSDM_FilterRegConvHalfCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter) {
+  if (hdfsdm_filter == &hdfsdm1_filter0) {
+	  for (int i=0;i<160;i++){
+		  mic_frame[i] = (int16_t) (microphone_buffer[i]>> 16);
+	  }
+	  mic_frame_ready = 1;
+  }
+}
+
+void HAL_DFSDM_FilterRegConvCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter)
+{
+	  if (hdfsdm_filter == &hdfsdm1_filter0) {
+		  for (int i=0;i<160;i++){
+			  mic_frame[i] = (int16_t) (microphone_buffer[i+160]>> 16);
+		  }
+		  mic_frame_ready = 1;
+	  }
+}
+
+
 /* USER CODE END 4 */
 
 /**
