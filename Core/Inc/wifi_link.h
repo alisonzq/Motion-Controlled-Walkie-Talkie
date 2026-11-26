@@ -47,35 +47,23 @@ typedef struct {
   uint32_t flushed; // old packets thrown away when switching to RX
 } WifiLinkStats;
 
-// Start the module, join the hotspot and start in RX mode. Call once at startup.
 WifiLinkStatus wifi_link_init(void);
 
-/* Switch between RX and TX (takes a few ms; call when the button changes state, not every loop).
-   Returns WIFI_LINK_OK, or WIFI_LINK_ERR_TX_OPEN / _RX_OPEN / _CLOSE. */
 WifiLinkStatus wifi_link_set_mode(WifiLinkMode mode);
 WifiLinkMode wifi_link_get_mode(void);
 
-/* TX mode only: send one frame of WIFI_LINK_FRAME_SAMPLES samples.
-   Returns 1 on success, 0 on failure (or if not in TX mode). */
 int wifi_link_send_frame(const int16_t *samples);
 
-/* RX mode only: wait up to timeout_ms for one frame. Returns 1 and fills samples
-   (WIFI_LINK_FRAME_SAMPLES values) if a frame arrived, 0 otherwise.
-   Keep timeout_ms small (5-10 ms) so the main loop stays responsive. */
 int wifi_link_poll(int16_t *samples, uint32_t timeout_ms);
 
-// RX mode only: throw away packets waiting in the module.
 void wifi_link_flush(void);
 
-// Counters for testing and the report.
 void wifi_link_get_stats(WifiLinkStats *out);
 void wifi_link_reset_stats(void);
 
-// This board's IP address (valid after wifi_link_init), and the other board's (PEER_IP).
 void wifi_link_get_ip(uint8_t ip[4]);
 void wifi_link_get_peer_ip(uint8_t ip[4]);
 
-// The Wi-Fi module's reply to the last command, useful after an error.
 const char *wifi_link_last_error(void);
 
 #endif // WIFI_LINK_H

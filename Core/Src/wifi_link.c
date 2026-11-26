@@ -99,6 +99,7 @@ static WifiLinkStatus close_rx(void)
   return WIFI_LINK_OK;
 }
 
+// Start the module, join the hotspot and start in RX mode. Call once at startup.
 WifiLinkStatus wifi_link_init(void)
 {
   if (WIFI_Init() != WIFI_STATUS_OK) { // resets the module
@@ -114,6 +115,7 @@ WifiLinkStatus wifi_link_init(void)
   return open_rx(); // start listening
 }
 
+// Switch between RX and TX (takes a few ms; call when the button changes state).
 WifiLinkStatus wifi_link_set_mode(WifiLinkMode new_mode)
 {
   WifiLinkStatus s = WIFI_LINK_OK;
@@ -155,6 +157,7 @@ WifiLinkMode wifi_link_get_mode(void)
   return mode;
 }
 
+// TX mode only: send one frame of WIFI_LINK_FRAME_SAMPLES samples.
 int wifi_link_send_frame(const int16_t *samples)
 {
   uint16_t sent_len = 0;
@@ -175,6 +178,8 @@ int wifi_link_send_frame(const int16_t *samples)
   return 1;
 }
 
+/* RX mode only: wait up to timeout_ms for one frame. Returns 1 and fills samples
+   (WIFI_LINK_FRAME_SAMPLES values) if a frame arrived, 0 otherwise.*/
 int wifi_link_poll(int16_t *samples, uint32_t timeout_ms)
 {
   uint16_t rx_len = 0;
@@ -210,6 +215,7 @@ int wifi_link_poll(int16_t *samples, uint32_t timeout_ms)
   return 1;
 }
 
+// RX mode only: throw away packets waiting in the module.
 void wifi_link_flush(void)
 {
   uint16_t rx_len;
@@ -228,6 +234,7 @@ void wifi_link_flush(void)
   rx_expected = -1; // don't count the thrown-away packets as lost
 }
 
+// Counters for testing and the report.
 void wifi_link_get_stats(WifiLinkStats *out)
 {
   *out = stats;
@@ -238,16 +245,19 @@ void wifi_link_reset_stats(void)
   memset(&stats, 0, sizeof stats);
 }
 
+//This board's IP address (valid after wifi_link_init)
 void wifi_link_get_ip(uint8_t ip[4])
 {
   memcpy(ip, my_ip, sizeof my_ip);
 }
 
+//the other board's IP (PEER_IP).
 void wifi_link_get_peer_ip(uint8_t ip[4])
 {
   memcpy(ip, peer_ip, sizeof peer_ip);
 }
 
+//The wifi module's reply to the last command, useful after an error.
 const char *wifi_link_last_error(void)
 {
   return WIFI_GetLastResponse();
