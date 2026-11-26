@@ -45,6 +45,9 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+DAC_HandleTypeDef hdac1;
+DMA_HandleTypeDef hdma_dac1_ch1;
+
 DFSDM_Filter_HandleTypeDef hdfsdm1_filter0;
 DFSDM_Channel_HandleTypeDef hdfsdm1_channel2;
 DMA_HandleTypeDef hdma_dfsdm1_flt0;
@@ -52,6 +55,8 @@ DMA_HandleTypeDef hdma_dfsdm1_flt0;
 I2C_HandleTypeDef hi2c2;
 
 SPI_HandleTypeDef hspi3;
+
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
 
@@ -70,6 +75,21 @@ int32_t microphone_buffer[64] ;
 int16_t mic_frame[WIFI_LINK_FRAME_SAMPLES]; // mic code fills this
 volatile uint8_t mic_frame_ready = 0; //hand audio from mic code to wifi code
 static int16_t rx_frame[WIFI_LINK_FRAME_SAMPLES]; // last frame received from other board
+
+
+#define PLAYBACK_HALF_SAMPLES 160U
+#define PLAYBACK_DMA_SAMPLES  (2U * PLAYBACK_HALF_SAMPLES)
+
+_Alignas(4) static uint16_t playback_dma[PLAYBACK_DMA_SAMPLES];
+
+#define PLAYBACK_QUEUE_FRAMES 4U
+#define DAC_MIDPOINT 2048U
+#define PLAYBACK_VOLUME_PERCENT 100
+
+static int16_t playback_queue[PLAYBACK_QUEUE_FRAMES][PLAYBACK_HALF_SAMPLES];
+static volatile uint32_t playback_write;
+static volatile uint32_t playback_read;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,6 +100,8 @@ static void MX_I2C2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_DFSDM1_Init(void);
+static void MX_DAC1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -91,10 +113,64 @@ static void log_uart(const char *s)
   HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
 }
 
-// called with every frame received from the other board (160 int16 samples). speaker code to replace
-__weak void audio_play_frame(const int16_t *frame)
+void audio_play_frame(const int16_t *frame)
 {
-  (void)frame;
+    uint32_t write = playback_write;
+    uint32_t next = (write + 1U) % PLAYBACK_QUEUE_FRAMES;
+
+    if (next == playback_read)
+    {
+        return;  /* Queue is full. Drop the new frame. */
+    }
+
+    for (uint32_t i = 0; i < PLAYBACK_HALF_SAMPLES; i++)
+    {
+        playback_queue[write][i] = frame[i];
+    }
+
+    __DMB();
+    playback_write = next;
+}
+
+static void FillPlaybackHalf(uint16_t *destination)
+{
+    uint32_t read = playback_read;
+
+    if (read == playback_write)
+    {
+        for (uint32_t i = 0; i < PLAYBACK_HALF_SAMPLES; i++)
+        {
+            destination[i] = DAC_MIDPOINT;
+        }
+        return;
+    }
+
+    __DMB();
+    for (uint32_t i = 0; i < PLAYBACK_HALF_SAMPLES; i++)
+    {
+    	int32_t sample = playback_queue[read][i];
+    	int32_t scaled = (sample * PLAYBACK_VOLUME_PERCENT) / 100;
+    	destination[i] = (uint16_t)((scaled + 32768) / 16);
+    }
+
+    __DMB();
+    playback_read = (read + 1U) % PLAYBACK_QUEUE_FRAMES;
+}
+
+void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef *hdac)
+{
+    if (hdac->Instance == DAC1)
+    {
+        FillPlaybackHalf(&playback_dma[0]);
+    }
+}
+
+void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac)
+{
+    if (hdac->Instance == DAC1)
+    {
+        FillPlaybackHalf(&playback_dma[PLAYBACK_HALF_SAMPLES]);
+    }
 }
 
 /* USER CODE END 0 */
@@ -133,7 +209,25 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI3_Init();
   MX_DFSDM1_Init();
+  MX_DAC1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+
+  FillPlaybackHalf(&playback_dma[0]);
+  FillPlaybackHalf(&playback_dma[PLAYBACK_HALF_SAMPLES]);
+
+  if (HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1,
+                        (uint32_t *)playback_dma, PLAYBACK_DMA_SAMPLES,
+                        DAC_ALIGN_12B_R) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
+  if (HAL_TIM_Base_Start(&htim2) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
   char msg[128];
   uint8_t ip[4];
 
@@ -229,6 +323,7 @@ int main(void)
   * @retval None
   */
 void SystemClock_Config(void)
+
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
@@ -272,6 +367,50 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief DAC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DAC1_Init(void)
+{
+
+  /* USER CODE BEGIN DAC1_Init 0 */
+
+  /* USER CODE END DAC1_Init 0 */
+
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN DAC1_Init 1 */
+
+  /* USER CODE END DAC1_Init 1 */
+
+  /** DAC Initialization
+  */
+  hdac1.Instance = DAC1;
+  if (HAL_DAC_Init(&hdac1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT1 config
+  */
+  sConfig.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
+  sConfig.DAC_Trigger = DAC_TRIGGER_T2_TRGO;
+  sConfig.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_ABOVE_80MHZ;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  sConfig.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_DISABLE;
+  sConfig.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
+  if (HAL_DAC_ConfigChannel(&hdac1, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DAC1_Init 2 */
+
+  /* USER CODE END DAC1_Init 2 */
+
 }
 
 /**
@@ -416,6 +555,51 @@ static void MX_SPI3_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 14999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -477,6 +661,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
 
@@ -494,6 +681,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
