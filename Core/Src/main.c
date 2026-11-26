@@ -574,7 +574,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		HAL_GPIO_TogglePin(led_GPIO_Port, led_Pin);
 		switch(state){
 		case RECEIVING:
-			if (HAL_DFSDM_FilterRegularStart_DMA(&hdfsdm1_filter0,microphone_buffer,64)!= HAL_OK){
+			if (HAL_DFSDM_FilterRegularStart_DMA(&hdfsdm1_filter0,microphone_buffer,320)!= HAL_OK){
 				Error_Handler();
 			}
 			state = TRANSMITTING;
