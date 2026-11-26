@@ -36,7 +36,7 @@
 /* USER CODE BEGIN PD */
 // WIFI_TEST 1: Wi-Fi test. The blue button switches RX/TX, a dummy sound is sent in TX and stats print every second.
 // WIFI_TEST 0: the real walkie-talkie. The blue button switches RX/TX, sound comes from the mic (mic_frame) and goes to the speaker (audio_play_frame).
-#define WIFI_TEST 0
+#define WIFI_TEST 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
