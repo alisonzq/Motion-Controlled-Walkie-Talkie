@@ -34,10 +34,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// WIFI_TEST 1: Wi-Fi test. Sends a dummy sound, switches RX/TX by itself every 5 s and prints stats every second. 
+// WIFI_TEST 1: Wi-Fi test. The blue button switches RX/TX, a dummy sound is sent in TX and stats print every second.
 // WIFI_TEST 0: the real walkie-talkie. The blue button switches RX/TX, sound comes from the mic (mic_frame) and goes to the speaker (audio_play_frame).
 #define WIFI_TEST 1
-#define WIFI_TEST_SWITCH_MS 5000 // test only: time spent in each mode
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -156,14 +155,13 @@ int main(void)
   uint32_t retry_at = HAL_GetTick(); // when to retry a mode switch that failed
 
 #if WIFI_TEST
-  uint32_t last_switch = HAL_GetTick();
   uint32_t last_frame = HAL_GetTick();
   uint32_t last_report = HAL_GetTick();
   WifiLinkStats st, prev = {0};
   for (int i = 0; i < WIFI_LINK_FRAME_SAMPLES; i++) {
     mic_frame[i] = (int16_t)(i * 100); // dummy sound: a ramp
   }
-  log_uart("WIFI_TEST: switching RX/TX every 5 s with a dummy sound\r\n");
+  log_uart("WIFI_TEST: press the blue button to switch RX/TX (dummy sound in TX)\r\n");
 #else
   log_uart("Ready: press the blue button to talk, press again to listen\r\n");
 #endif
@@ -176,16 +174,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // 1. mode selection
-#if WIFI_TEST
-    //mode switches every 5 sec
-    if (HAL_GetTick() - last_switch >= WIFI_TEST_SWITCH_MS) {
-      last_switch = HAL_GetTick();
-      want = (want == WIFI_LINK_MODE_RX) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
-    }
-#else
+    // 1. mode selection: follow the blue button (the button interrupt changes state)
     want = (state == TRANSMITTING) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
-#endif
     if (wifi_link_get_mode() != want && (int32_t)(HAL_GetTick() - retry_at) >= 0) {
       uint32_t t0 = HAL_GetTick();
       wl = wifi_link_set_mode(want);
