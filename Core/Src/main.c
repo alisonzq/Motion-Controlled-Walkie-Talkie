@@ -23,12 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
-#include "wifi.h"      /* WIFI_Init, WIFI_Connect, WIFI_SendData, ... (also pulls in es_wifi.h and es_wifi_io.h) */
-#if __has_include("wifi_secrets.h")
-#include "wifi_secrets.h"   /* WIFI_SSID, WIFI_PASSWORD - not in git */
-#else
-#error "Missing Core/Inc/wifi_secrets.h: copy wifi_secrets_template.h to wifi_secrets.h and fill in your hotspot name and password."
-#endif
+#include "wifi.h"        /* SPI_WIFI_ISR() for the PE1 interrupt */
+#include "wifi_link.h"   /* audio link between the boards: wifi_link_init, _send_frame, _poll, ... */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,7 +34,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+// WIFI_TEST 1: Wi-Fi test. Sends a dummy sound, switches RX/TX by itself every 5 s and prints stats every second. 
+// WIFI_TEST 0: the real walkie-talkie. The blue button switches RX/TX, sound comes from the mic (mic_frame) and goes to the speaker (audio_play_frame).
+#define WIFI_TEST 1
+#define WIFI_TEST_SWITCH_MS 5000 // test only: time spent in each mode
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,7 +58,7 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 // state machine to show whether the walkie-talkie is receiving or transmitting
-static enum {
+static volatile enum {
 	//receiving
 	RECEIVING,
 	//transmitting
@@ -67,6 +66,11 @@ static enum {
 } state ;
 
 int32_t microphone_buffer[64] ;
+
+// audio frames for the Wi-Fi link: 160 int16 samples = 20 ms at 8 kHz
+int16_t mic_frame[WIFI_LINK_FRAME_SAMPLES]; // mic code fills this
+volatile uint8_t mic_frame_ready = 0; //hand audio from mic code to wifi code
+static int16_t rx_frame[WIFI_LINK_FRAME_SAMPLES]; // last frame received from other board
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -86,6 +90,12 @@ static void MX_DFSDM1_Init(void);
 static void log_uart(const char *s)
 {
   HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
+}
+
+// called with every frame received from the other board (160 int16 samples). speaker code to replace
+__weak void audio_play_frame(const int16_t *frame)
+{
+  (void)frame;
 }
 
 /* USER CODE END 0 */
@@ -125,19 +135,38 @@ int main(void)
   MX_SPI3_Init();
   MX_DFSDM1_Init();
   /* USER CODE BEGIN 2 */
-  char msg[64];
+  char msg[128];
   uint8_t ip[4];
 
   log_uart("Wi-Fi init...\r\n");
-  if (WIFI_Init() != WIFI_STATUS_OK) { log_uart("init FAILED\r\n"); Error_Handler(); }
-
-  if (WIFI_Connect(WIFI_SSID, WIFI_PASSWORD, WIFI_ECN_WPA2_PSK) != WIFI_STATUS_OK) {
-    log_uart("connect FAILED\r\n"); Error_Handler();
+  WifiLinkStatus wl = wifi_link_init(); // starts in RX mode
+  if (wl != WIFI_LINK_OK) {
+    snprintf(msg, sizeof msg, "Wi-Fi FAILED (step %d), module replied: %.50s\r\n", (int)wl, wifi_link_last_error());
+    log_uart(msg);
+    Error_Handler();
   }
-  WIFI_GetIP_Address(ip, 4);
-  snprintf(msg, sizeof msg, "Connected, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  wifi_link_get_ip(ip);
+  snprintf(msg, sizeof msg, "Wi-Fi ready, IP %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
   log_uart(msg);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);   // LED2 on = connected
+  wifi_link_get_peer_ip(ip);
+  snprintf(msg, sizeof msg, "Other board (PEER_IP): %d.%d.%d.%d\r\n", ip[0], ip[1], ip[2], ip[3]);
+  log_uart(msg);
+
+  WifiLinkMode want = WIFI_LINK_MODE_RX; // the mode we should be in
+  uint32_t retry_at = HAL_GetTick(); // when to retry a mode switch that failed
+
+#if WIFI_TEST
+  uint32_t last_switch = HAL_GetTick();
+  uint32_t last_frame = HAL_GetTick();
+  uint32_t last_report = HAL_GetTick();
+  WifiLinkStats st, prev = {0};
+  for (int i = 0; i < WIFI_LINK_FRAME_SAMPLES; i++) {
+    mic_frame[i] = (int16_t)(i * 100); // dummy sound: a ramp
+  }
+  log_uart("WIFI_TEST: switching RX/TX every 5 s with a dummy sound\r\n");
+#else
+  log_uart("Ready: press the blue button to talk, press again to listen\r\n");
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -147,6 +176,60 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // 1. mode selection
+#if WIFI_TEST
+    //mode switches every 5 sec
+    if (HAL_GetTick() - last_switch >= WIFI_TEST_SWITCH_MS) {
+      last_switch = HAL_GetTick();
+      want = (want == WIFI_LINK_MODE_RX) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
+    }
+#else
+    want = (state == TRANSMITTING) ? WIFI_LINK_MODE_TX : WIFI_LINK_MODE_RX;
+#endif
+    if (wifi_link_get_mode() != want && (int32_t)(HAL_GetTick() - retry_at) >= 0) {
+      uint32_t t0 = HAL_GetTick();
+      wl = wifi_link_set_mode(want);
+      if (wl == WIFI_LINK_OK) {
+        snprintf(msg, sizeof msg, "---- %s (switch took %lu ms) ----\r\n", want == WIFI_LINK_MODE_TX ? "TX: talking" : "RX: listening", HAL_GetTick() - t0);
+      } else {
+        snprintf(msg, sizeof msg, "switch to %s failed (step %d): %.40s\r\n", want == WIFI_LINK_MODE_TX ? "TX" : "RX", (int)wl, wifi_link_last_error());
+        retry_at = HAL_GetTick() + 1000; // the module refused: try again in 1 s
+      }
+      log_uart(msg);
+    }
+
+#if WIFI_TEST
+    //pretend to be the mic, one dummy frame every 20 ms
+    if (HAL_GetTick() - last_frame >= 20) {
+      last_frame = (HAL_GetTick() - last_frame > 100) ? HAL_GetTick() : last_frame + 20; // steady 50/s, no burst after a stall
+      mic_frame_ready = 1;
+    }
+#endif
+
+    // 2. move the audio
+    if (wifi_link_get_mode() == WIFI_LINK_MODE_TX) {
+      if (mic_frame_ready) {
+        mic_frame_ready = 0;
+        wifi_link_send_frame(mic_frame);
+      }
+    } else if (wifi_link_poll(rx_frame, 5)) { // 1 = a frame arrived
+      audio_play_frame(rx_frame);
+    }
+
+#if WIFI_TEST
+    //stats once per second
+    if (HAL_GetTick() - last_report >= 1000) {
+      int tx = (wifi_link_get_mode() == WIFI_LINK_MODE_TX);
+      wifi_link_get_stats(&st);
+      snprintf(msg, sizeof msg, "%s %lu/s  sent %lu (err %lu)  rx %lu  lost %lu  bad %lu  flushed %lu\r\n",
+               tx ? "TX" : "RX",
+               tx ? st.sent - prev.sent : st.received - prev.received,
+               st.sent, st.send_errors, st.received, st.lost, st.bad, st.flushed);
+      log_uart(msg);
+      prev = st;
+      last_report += 1000;
+    }
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -483,21 +566,20 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* Wi-Fi module: SPI3 interrupt. The driver (es_wifi_io.c) owns its own handle, hspi. */
+/* Wi-Fi module: SPI3 interrupt. */
 extern SPI_HandleTypeDef hspi;
 void SPI3_IRQHandler(void)
 {
   HAL_SPI_IRQHandler(&hspi);
 }
 
-/* All EXTI lines end up here. Add the push-button (PC13) handling below. */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_1)        /* PE1: Wi-Fi module data ready */
+  if (GPIO_Pin == GPIO_PIN_1) /* PE1: Wi-Fi module data ready */
   {
     SPI_WIFI_ISR();
   }
-  else if (GPIO_Pin == GPIO_PIN_13)  /* PC13: blue push-button */
+  else if (GPIO_Pin == GPIO_PIN_13) /* PC13: blue push-button */
   {
 		HAL_GPIO_TogglePin(led_GPIO_Port, led_Pin);
 		switch(state){
